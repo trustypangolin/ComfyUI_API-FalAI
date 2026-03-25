@@ -176,6 +176,7 @@ def schema_to_comfyui_input_types(schema):
             input_types["optional"][prop_name] = (input_type, input_config)
 
     input_types["optional"]["force_rerun"] = ("BOOLEAN", {"default": False})
+    input_types["optional"]["debug"] = ("BOOLEAN", {"default": False})
 
     # Handle array inputs with max item count - split into individual optional inputs
     input_types = handle_array_inputs_as_multiple(input_types, input_schema)

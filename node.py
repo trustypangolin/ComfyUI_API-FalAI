@@ -37,7 +37,12 @@ def create_comfyui_node(schema):
             tuple(return_type.values())
             if isinstance(return_type, dict)
             else (return_type,)
-        )
+        ) + ("STRING",)  # Add STRING output for the JSON payload
+        RETURN_NAMES = (
+            tuple(return_type.values())
+            if isinstance(return_type, dict)
+            else (return_type,)
+        ) + ("INPUT_JSON",)  # Name for the JSON output
         FUNCTION = "run_fal_model"
         CATEGORY = "🎨 API FalAI"
 
@@ -122,6 +127,31 @@ def create_comfyui_node(schema):
             }
             print(f"Running {fal_model} with {truncated_kwargs}")
 
+        def _base64_to_tensor(self, base64_str):
+            """Convert a base64 image string to a tensor."""
+            if not base64_str or not isinstance(base64_str, str):
+                return None
+            try:
+                # Extract base64 content from data URL
+                if base64_str.startswith("data:"):
+                    base64_data = base64_str.split(",", 1)[1]
+                else:
+                    base64_data = base64_str
+                
+                image_data = base64.b64decode(base64_data)
+                image = Image.open(BytesIO(image_data))
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+                
+                transform = transforms.ToTensor()
+                tensor_image = transform(image)
+                tensor_image = tensor_image.unsqueeze(0)
+                tensor_image = tensor_image.permute(0, 2, 3, 1).cpu().float()
+                return tensor_image
+            except Exception as e:
+                print(f"Error converting base64 to tensor: {e}")
+                return None
+
         def handle_image_output(self, output):
             if output is None:
                 print("No image output received")
@@ -189,14 +219,63 @@ def create_comfyui_node(schema):
                         del kwargs[key]
 
         def run_fal_model(self, **kwargs):
+            # Extract debug flag before processing
+            debug_mode = kwargs.pop("debug", False)
+            
             self.handle_array_inputs(kwargs)
             self.remove_falsey_optional_inputs(kwargs)
             self.convert_input_images_to_base64(kwargs)
             self.log_input(kwargs)
-            kwargs_without_force_rerun = {
-                k: v for k, v in kwargs.items() if k != "force_rerun"
+            
+            # Remove force_rerun and debug from the API call but keep for debug output
+            kwargs_without_special = {
+                k: v for k, v in kwargs.items() if k not in ["force_rerun", "debug"]
             }
-            output = fal_client.subscribe(fal_model, kwargs_without_force_rerun)
+            
+            # Convert kwargs to JSON string for output
+            input_json = json.dumps(kwargs_without_special, indent=2)
+            
+            if debug_mode:
+                # In debug mode, return the first input image and the JSON payload
+                print(f"DEBUG MODE: Skipping API call, returning input data")
+                print(f"Input JSON: {input_json}")
+                
+                # Find the first image input to return and convert to tensor
+                debug_tensor = None
+                for key, value in kwargs_without_special.items():
+                    if isinstance(value, str) and value.startswith("data:image"):
+                        debug_tensor = self._base64_to_tensor(value)
+                        break
+                    elif key in ["image", "images", "input_image", "image_url", "image_urls"]:
+                        if isinstance(value, list) and value:
+                            debug_tensor = self._base64_to_tensor(value[0])
+                        elif isinstance(value, str) and value:
+                            debug_tensor = self._base64_to_tensor(value)
+                        break
+                
+                processed_outputs = []
+                if isinstance(return_type, dict):
+                    for prop_name, prop_type in return_type.items():
+                        if prop_type == "IMAGE":
+                            processed_outputs.append(debug_tensor)
+                        elif prop_type == "AUDIO":
+                            processed_outputs.append(None)
+                        elif prop_type == "VIDEO_URI":
+                            processed_outputs.append(None)
+                        else:
+                            processed_outputs.append("")
+                else:
+                    if return_type == "IMAGE":
+                        processed_outputs.append(debug_tensor)
+                    elif return_type == "AUDIO":
+                        processed_outputs.append(None)
+                    else:
+                        processed_outputs.append("")
+                
+                processed_outputs.append(input_json)
+                return tuple(processed_outputs)
+            
+            output = fal_client.subscribe(fal_model, kwargs_without_special)
             print(f"Output: {output}")
 
             processed_outputs = []
@@ -226,6 +305,7 @@ def create_comfyui_node(schema):
                 else:
                     processed_outputs.append("".join(list(output)).strip())
 
+            processed_outputs.append(input_json)
             return tuple(processed_outputs)
 
     return node_name, FalToComfyUI
